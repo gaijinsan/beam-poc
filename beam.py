@@ -1,36 +1,59 @@
 import apache_beam as beam
-import re
+from apache_beam.io.kafka import ReadFromKafka
+from apache_beam.options.pipeline_options import PipelineOptions
+#from apache_beam.transforms.window import FixedWindows
+from apache_beam import window
+from apache_beam.io import fileio
+import datetime
+import logging
 
-input_pattern = 'data/'
-output_prefix_ham = 'output/fullcodeham'
-output_prefix_spam = 'output/fullcodespam'
+# Configure logging at the beginning of your script
+logging.basicConfig(level=logging.INFO)
 
-# Ham Word Count
-with beam.Pipeline() as pipeline1:
-  ham_pl = (
-    pipeline1
-      | 'Take in Dataset' >> beam.io.ReadFromText(input_pattern)
-      | 'Separate to list' >> beam.Map(lambda line: line.split("\t"))
-      | 'Keep only ham' >> beam.Filter(lambda line: line[0] == "ham")
-      | 'Find words' >> beam.FlatMap(lambda line: re.findall(r"[a-zA-Z']+", line[1]))
-      | 'Pair words with 1' >> beam.Map(lambda word: (word, 1))
-      | 'Group and sum' >> beam.CombinePerKey(sum)
-      | 'Format results' >> beam.Map(lambda x: x[0]+","+str(x[1]))
-      | 'Write results' >> beam.io.WriteToText(output_prefix_ham, file_name_suffix = ".txt")
-  )
+# Create a PipelineOptions object
+options = PipelineOptions()
 
-# Spam Word Count
-with beam.Pipeline() as pipeline2:
-  spam = (
-    pipeline2
-      | 'Take in Dataset' >> beam.io.ReadFromText(input_pattern)
-      | 'Separate to list' >> beam.Map(lambda line: line.split("\t"))
-      | 'Keep only spam' >> beam.Filter(lambda line: line[0] == "spam")
-      | 'Find words' >> beam.FlatMap(lambda line: re.findall(r"[a-zA-Z']+", line[1]))
-      | 'Pair words with 1' >> beam.Map(lambda word: (word, 1))
-      | 'Group and sum' >> beam.CombinePerKey(sum)
-      #| 'Format results' >> beam.Map(lambda word_c: str(word_c))
-      | 'Format results' >> beam.Map(lambda x: x[0]+","+str(x[1]))
-      | 'Write results' >> beam.io.WriteToText(output_prefix_spam, file_name_suffix = ".txt")
-  )
+# Log the parsed options to confirm the runner is set correctly
+logging.info("PipelineOptions: %s", options.get_all_options())
 
+# Define a DoFn for logging elements
+class LogElements(beam.DoFn):
+    def process(self, element):
+        logging.info("Received element from Kafka: %s", element)
+        yield element
+
+# Create a unique group ID for this run using the current timestamp
+run_id = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+consumer_group_id = f"my-beam-app-test-{run_id}"
+
+consumer_config = {
+    "bootstrap.servers": "localhost:9092",
+    "group.id": consumer_group_id,
+    "auto.offset.reset": "earliest"
+}
+topics = ["mastodon-posts"]
+
+def create_file_name_based_on_window(window, pane, shard_index, total_shards, compression, destination):
+    """Creates a filename including the window's start time and shard info."""
+    # The 'window' parameter is a Beam window object, not a simple string.
+    start_time = window.start.to_rfc3339().replace(':', '-').replace('.', '-')
+    return f"output-{start_time}-{shard_index:05d}-of-{total_shards:05d}.txt"
+
+with beam.Pipeline(options=options) as pipeline:
+    kafka_records = (
+        pipeline
+        | ReadFromKafka(
+            consumer_config=consumer_config,
+            topics=topics,
+            max_num_records=40
+        )
+        | 'Decode Msg' >> beam.Map(lambda kv: kv[1].decode('utf-8'))
+        | "Log Kafka Messages" >> beam.ParDo(LogElements())
+        | "Apply fixed windows" >> beam.WindowInto(window.FixedWindows(10))
+        | "Combine messages" >> beam.Map(lambda x: f"Message: {x}")
+        | "Write to Text" >> fileio.WriteToFiles(
+            path='output',
+            file_naming=create_file_name_based_on_window,
+            sink=fileio.TextSink()
+        )
+    )
