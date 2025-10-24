@@ -1,7 +1,6 @@
 import apache_beam as beam
 from apache_beam.io.kafka import ReadFromKafka
 from apache_beam.options.pipeline_options import PipelineOptions
-#from apache_beam.transforms.window import FixedWindows
 from apache_beam import window
 from apache_beam.io import fileio
 import datetime
@@ -35,7 +34,6 @@ topics = ["mastodon-posts"]
 
 def create_file_name_based_on_window(window, pane, shard_index, total_shards, compression, destination):
     """Creates a filename including the window's start time and shard info."""
-    # The 'window' parameter is a Beam window object, not a simple string.
     start_time = window.start.to_rfc3339().replace(':', '-').replace('.', '-')
     return f"output-{start_time}-{shard_index:05d}-of-{total_shards:05d}.txt"
 
